@@ -3,8 +3,11 @@ import * as dotenv from "dotenv";
 import { CronJob } from "cron";
 import * as fs from "fs/promises";
 import * as path from "path";
+import express from "express";
 
 dotenv.config();
+
+const PORT = process.env.PORT || 3000;
 
 interface PerplexityResponse {
 	text: string;
@@ -270,6 +273,22 @@ async function main() {
 		setTimeout(main, 5 * 60 * 1000);
 	}
 }
+
+const app = express();
+
+app.get("/health", (req, res) => {
+	res.json({ status: "ok" });
+});
+
+app.get("/", (req, res) => {
+	res.json({ status: "Fact checker bot is running" });
+});
+
+const port = typeof PORT === "string" ? parseInt(PORT, 10) : PORT;
+
+app.listen(port, "0.0.0.0", () => {
+	console.log(`Server is running on port ${port}`);
+});
 
 const job = new CronJob("* * * * *", () => {
 	main().catch((error) => {

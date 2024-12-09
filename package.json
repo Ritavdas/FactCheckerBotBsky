@@ -9,15 +9,22 @@
     "dev": "ts-node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["bluesky", "bot", "typescript", "fact-check"],
+  "keywords": [
+    "bluesky",
+    "bot",
+    "typescript",
+    "fact-check"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@atproto/api": "^0.3.7",
     "cron": "^2.3.0",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+    "express": "^4.21.2"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^18.15.11",
     "ts-node": "^10.9.1",
     "typescript": "^5.0.4"
