@@ -19,7 +19,7 @@ A Bluesky bot that performs fact-checking on mentioned posts using Perplexity AI
 npm install
 ```
 
-3. Copy `.env.example` to `.env` and fill in your credentials:
+3.Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
 cp .env.example .env

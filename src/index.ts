@@ -1,17 +1,21 @@
 import { BskyAgent, RichText } from "@atproto/api";
 import * as dotenv from "dotenv";
 import { CronJob } from "cron";
+import * as fs from "fs/promises";
+import * as path from "path";
 
 dotenv.config();
 
-// Perplexity API setup
 interface PerplexityResponse {
 	text: string;
 	confidence: number;
 	sources?: string[];
 }
 
-// Rate limiting configuration (reusing from TimelyBsky but with adjusted values)
+interface NotificationRecord {
+	text: string;
+}
+
 const RATE_LIMITS = {
 	HOURLY_POINTS: 5000,
 	DAILY_POINTS: 35000,
@@ -22,15 +26,69 @@ const RATE_LIMITS = {
 	},
 } as const;
 
-// Rate limit state
-const rateLimit = {
-	hourlyPoints: 0,
-	dailyPoints: 0,
-	lastHourReset: new Date(),
-	lastDayReset: new Date(),
-};
+const RATE_LIMIT_FILE = path.join(__dirname, "ratelimit.json");
 
-// Add this interface near the top of the file with other interfaces
+async function loadRateLimit() {
+	try {
+		const data = await fs.readFile(RATE_LIMIT_FILE, "utf8");
+		return JSON.parse(data);
+	} catch {
+		return {
+			hourlyPoints: 0,
+			dailyPoints: 0,
+			lastHourReset: new Date().toISOString(),
+			lastDayReset: new Date().toISOString(),
+		};
+	}
+}
+
+async function saveRateLimit(rateLimit: any) {
+	await fs.writeFile(RATE_LIMIT_FILE, JSON.stringify(rateLimit, null, 2));
+}
+
+async function checkAndResetCounters() {
+	const rateLimit = await loadRateLimit();
+	const now = new Date();
+	const lastHourReset = new Date(rateLimit.lastHourReset);
+	const lastDayReset = new Date(rateLimit.lastDayReset);
+	let updated = false;
+
+	if (now.getTime() - lastHourReset.getTime() > 3600000) {
+		rateLimit.hourlyPoints = 0;
+		rateLimit.lastHourReset = now.toISOString();
+		updated = true;
+	}
+
+	if (now.getTime() - lastDayReset.getTime() > 86400000) {
+		rateLimit.dailyPoints = 0;
+		rateLimit.lastDayReset = now.toISOString();
+		updated = true;
+	}
+
+	if (updated) {
+		await saveRateLimit(rateLimit);
+	}
+	return rateLimit;
+}
+
+async function canPerformAction(
+	action: keyof typeof RATE_LIMITS.ACTION_COSTS
+): Promise<boolean> {
+	const rateLimit = await checkAndResetCounters();
+	const cost = RATE_LIMITS.ACTION_COSTS[action];
+	return (
+		rateLimit.hourlyPoints + cost <= RATE_LIMITS.HOURLY_POINTS &&
+		rateLimit.dailyPoints + cost <= RATE_LIMITS.DAILY_POINTS
+	);
+}
+
+async function trackAction(action: keyof typeof RATE_LIMITS.ACTION_COSTS) {
+	const rateLimit = await loadRateLimit();
+	const cost = RATE_LIMITS.ACTION_COSTS[action];
+	rateLimit.hourlyPoints += cost;
+	rateLimit.dailyPoints += cost;
+	await saveRateLimit(rateLimit);
+}
 
 async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 	try {
@@ -59,16 +117,7 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 			}
 		);
 
-		if (!response.ok) {
-			throw new Error(`HTTP error! status: ${response.status}`);
-		}
-
 		const data = await response.json();
-
-		if (!data.choices || data.choices.length === 0) {
-			throw new Error("No response from API.");
-		}
-
 		const analysis = data.choices[0].message.content;
 		return {
 			text: analysis,
@@ -81,26 +130,21 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 	}
 }
 
-// Helper function to extract confidence from AI response
 function extractConfidence(text: string): number {
-	// Basic confidence extraction - can be enhanced based on actual API response format
 	if (text.toLowerCase().includes("highly confident")) return 0.9;
 	if (text.toLowerCase().includes("confident")) return 0.7;
 	if (text.toLowerCase().includes("likely")) return 0.5;
 	if (text.toLowerCase().includes("uncertain")) return 0.3;
-	return 0.5; // default confidence
+	return 0.5;
 }
 
-// Helper function to extract sources from AI response
 function extractSources(text: string): string[] {
-	// This can be enhanced based on actual API response format
 	const sourceMatches = text.match(/\[(.*?)\]/g);
 	return sourceMatches
 		? sourceMatches.map((s) => s.replace(/[\[\]]/g, ""))
 		: [];
 }
 
-// Create a Bluesky Agent
 const agent = new BskyAgent({
 	service: "https://bsky.social",
 });
@@ -122,7 +166,7 @@ async function formatFactCheckResponse(
 			"\nSources:\n" + factCheck.sources.map((s) => `• ${s}`).join("\n");
 	}
 
-	return response.slice(0, 300); // Bluesky character limit
+	return response.slice(0, 300);
 }
 
 async function handleFactCheckRequest(
@@ -130,13 +174,8 @@ async function handleFactCheckRequest(
 	replyTo?: { uri: string; cid: string }
 ) {
 	try {
-		// Remove the hashtag and bot mention from the text
 		const cleanText = text.replace(/#factcheck/gi, "").trim();
-
-		// Get fact check from Perplexity
 		const factCheck = await queryPerplexity(cleanText);
-
-		// Format and post response
 		const response = await formatFactCheckResponse(factCheck);
 		await createPost(response, replyTo);
 	} catch (error) {
@@ -151,7 +190,7 @@ async function createPost(
 	text: string,
 	replyTo?: { uri: string; cid: string }
 ) {
-	if (!canPerformAction("CREATE")) {
+	if (!(await canPerformAction("CREATE"))) {
 		console.log("Rate limit reached. Skipping post.");
 		return;
 	}
@@ -159,7 +198,6 @@ async function createPost(
 	try {
 		const richText = new RichText({ text });
 		await richText.detectFacets(agent);
-
 		const post = {
 			text: richText.text,
 			facets: richText.facets,
@@ -172,7 +210,7 @@ async function createPost(
 		};
 
 		await agent.post(post);
-		trackAction("CREATE");
+		await trackAction("CREATE");
 		console.log(`Posted successfully: ${text.slice(0, 50)}...`);
 	} catch (error: any) {
 		console.error("Post creation error:", error);
@@ -183,36 +221,6 @@ async function createPost(
 	}
 }
 
-// Rate limiting functions (reused from TimelyBsky)
-function checkAndResetCounters() {
-	const now = new Date();
-	if (now.getTime() - rateLimit.lastHourReset.getTime() > 3600000) {
-		rateLimit.hourlyPoints = 0;
-		rateLimit.lastHourReset = now;
-	}
-	if (now.getTime() - rateLimit.lastDayReset.getTime() > 86400000) {
-		rateLimit.dailyPoints = 0;
-		rateLimit.lastDayReset = now;
-	}
-}
-
-function canPerformAction(
-	action: keyof typeof RATE_LIMITS.ACTION_COSTS
-): boolean {
-	checkAndResetCounters();
-	const cost = RATE_LIMITS.ACTION_COSTS[action];
-	return (
-		rateLimit.hourlyPoints + cost <= RATE_LIMITS.HOURLY_POINTS &&
-		rateLimit.dailyPoints + cost <= RATE_LIMITS.DAILY_POINTS
-	);
-}
-
-function trackAction(action: keyof typeof RATE_LIMITS.ACTION_COSTS) {
-	const cost = RATE_LIMITS.ACTION_COSTS[action];
-	rateLimit.hourlyPoints += cost;
-	rateLimit.dailyPoints += cost;
-}
-
 async function processNotifications() {
 	try {
 		const { data } = await agent.listNotifications({ limit: 20 });
@@ -220,26 +228,24 @@ async function processNotifications() {
 			(notif) =>
 				notif.reason === "mention" &&
 				!notif.isRead &&
-				"text" in notif.record && // Type guard to check if 'text' exists
-				(notif.record.text as string).toLowerCase().includes("#factcheck")
+				(notif.record as NotificationRecord).text
+					.toLowerCase()
+					.includes("#factcheck")
 		);
 
 		for (const request of factCheckRequests) {
-			if (!canPerformAction("CREATE")) {
+			if (!(await canPerformAction("CREATE"))) {
 				console.log(
 					"Rate limit reached for fact checks. Waiting for next cycle."
 				);
 				break;
 			}
+
 			await handleFactCheckRequest(
-				(request.record as { text: string }).text,
-				{
-					uri: request.uri,
-					cid: request.cid,
-				}
+				(request.record as NotificationRecord).text,
+				{ uri: request.uri, cid: request.cid }
 			);
 
-			// Add delay between requests
 			await new Promise((resolve) => setTimeout(resolve, 2000));
 		}
 
@@ -261,22 +267,19 @@ async function main() {
 		await processNotifications();
 	} catch (error) {
 		console.error("Error in main:", error);
-		setTimeout(main, 5 * 60 * 1000); // Retry after 5 minutes
+		setTimeout(main, 5 * 60 * 1000);
 	}
 }
 
-// Set up cron job to run every minute
 const job = new CronJob("* * * * *", () => {
 	main().catch((error) => {
 		console.error("Unhandled error in main:", error);
 	});
 });
 
-// Start the bot
 main();
 job.start();
 
-// Handle shutdown
 process.on("SIGINT", () => {
 	console.log("Shutting down gracefully....");
 	job.stop();
