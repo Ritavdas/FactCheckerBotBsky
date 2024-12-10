@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { BskyAgent, RichText } from "@atproto/api";
 import * as dotenv from "dotenv";
 import { CronJob } from "cron";
@@ -10,13 +11,19 @@ dotenv.config();
 const PORT = process.env.PORT || 3000;
 
 interface PerplexityResponse {
-	text: string;
-	confidence: number;
-	sources?: string[];
+	verdict: "True" | "False" | "Misleading" | "Unverified";
+	explanation: string;
+	source?: string;
 }
 
 interface NotificationRecord {
 	text: string;
+	reply?: {
+		parent: {
+			uri: string;
+			cid: string;
+		};
+	};
 }
 
 const RATE_LIMITS = {
@@ -109,7 +116,7 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 						{
 							role: "system",
 							content:
-								"You are a fact-checking assistant. Analyze the following statement and provide a clear, concise response about its accuracy. Include confidence level and sources when possible.",
+								"You are a fact-checker. Provide a verdict (True/False/Misleading/Unverified), brief explanation (<200 chars), and one key source. Format: {verdict}|{explanation}|{source}",
 						},
 						{
 							role: "user",
@@ -121,11 +128,17 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 		);
 
 		const data = await response.json();
-		const analysis = data.choices[0].message.content;
+		console.log("pplx response: ", data.choices[0].message.content);
+		const [verdict, explanation, source] =
+			data.choices[0].message.content.split("|");
+		console.log(
+			`verdict: ${verdict}, explanation ${explanation}, source ${source}`
+		);
+
 		return {
-			text: analysis,
-			confidence: extractConfidence(analysis),
-			sources: extractSources(analysis),
+			verdict: verdict.trim() as PerplexityResponse["verdict"],
+			explanation: explanation.trim(),
+			source: source?.trim(),
 		};
 	} catch (error) {
 		console.error("Perplexity API Error:", error);
@@ -133,43 +146,24 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 	}
 }
 
-function extractConfidence(text: string): number {
-	if (text.toLowerCase().includes("highly confident")) return 0.9;
-	if (text.toLowerCase().includes("confident")) return 0.7;
-	if (text.toLowerCase().includes("likely")) return 0.5;
-	if (text.toLowerCase().includes("uncertain")) return 0.3;
-	return 0.5;
-}
-
-function extractSources(text: string): string[] {
-	const sourceMatches = text.match(/\[(.*?)\]/g);
-	return sourceMatches
-		? sourceMatches.map((s) => s.replace(/[\[\]]/g, ""))
-		: [];
-}
-
 const agent = new BskyAgent({
 	service: "https://bsky.social",
 });
 
 async function formatFactCheckResponse(
-	factCheck: PerplexityResponse
+	factCheck: PerplexityResponse,
+	originalText: string
 ): Promise<string> {
-	const confidenceEmoji =
-		factCheck.confidence >= 0.7
-			? "✅"
-			: factCheck.confidence >= 0.4
-			? "⚠️"
-			: "❌";
+	const verdictEmoji = {
+		True: "✅",
+		False: "❌",
+		Misleading: "⚠️",
+		Unverified: "❓",
+	}[factCheck.verdict];
 
-	let response = `${confidenceEmoji} Fact Check Result:\n\n${factCheck.text}\n\n`;
-
-	if (factCheck.sources && factCheck.sources.length > 0) {
-		response +=
-			"\nSources:\n" + factCheck.sources.map((s) => `• ${s}`).join("\n");
-	}
-
-	return response.slice(0, 300);
+	return `${verdictEmoji} ${factCheck.verdict}\n${factCheck.explanation}${
+		factCheck.source ? `\nSource: ${factCheck.source}` : ""
+	}`.slice(0, 290);
 }
 
 async function handleFactCheckRequest(
@@ -177,10 +171,27 @@ async function handleFactCheckRequest(
 	replyTo?: { uri: string; cid: string }
 ) {
 	try {
-		const cleanText = text.replace(/#factcheck/gi, "").trim();
-		const factCheck = await queryPerplexity(cleanText);
-		const response = await formatFactCheckResponse(factCheck);
-		await createPost(response, replyTo);
+		if (!replyTo) {
+			throw new Error("No reply context provided");
+		}
+
+		const threadResponse = await agent.getPostThread({
+			uri: replyTo.uri,
+		});
+
+		const threadView = threadResponse.data.thread;
+		if ("parent" in threadView && threadView.parent?.post?.record.text) {
+			const contentToCheck = threadView.parent.post.record.text;
+			const factCheck = await queryPerplexity(contentToCheck);
+			console.log("fact check: ", factCheck);
+			const response = await formatFactCheckResponse(
+				factCheck,
+				contentToCheck
+			);
+			await createPost(response, replyTo);
+		} else {
+			throw new Error("Failed to fetch parent post");
+		}
 	} catch (error) {
 		console.error("Error in fact check handling:", error);
 		const errorResponse =
@@ -233,7 +244,8 @@ async function processNotifications() {
 				!notif.isRead &&
 				(notif.record as NotificationRecord).text
 					.toLowerCase()
-					.includes("#factcheck")
+					.includes("#factcheck") &&
+				(notif.record as NotificationRecord).reply?.parent
 		);
 
 		for (const request of factCheckRequests) {
