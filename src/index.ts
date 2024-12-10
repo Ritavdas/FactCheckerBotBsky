@@ -324,31 +324,22 @@ async function formatFactCheckResponse(
 	factCheck: PerplexityResponse,
 	originalText: string
 ): Promise<string> {
-	const splitter = new GraphemeSplitter();
+	console.log("[Format] Formatting response for:", {
+		verdict: factCheck.verdict,
+		originalText: originalText.slice(0, 50) + "...",
+	});
 
 	const verdictEmoji = {
 		True: "\u2705", // ✅
 		False: "\u274C", // ❌
-		Misleading: "\u26A0\uFE0F", // ⚠️
+		Misleading: "\u26A0\uFE0F", // ⚠️ (with variation selector)
 		Unverified: "\u2753", // ❓
 	};
-
-	let response = `${verdictEmoji[factCheck.verdict]} ${factCheck.verdict}\n${
-		factCheck.explanation
-	}`;
-	if (factCheck.source) {
-		response += `\nSource: ${factCheck.source}`;
-	}
-
-	// Ensure the response doesn't exceed 300 grapheme clusters
-	if (splitter.countGraphemes(response) > 300) {
-		const truncated = splitter
-			.splitGraphemes(response)
-			.slice(0, 300)
-			.join("");
-		response = truncated;
-	}
-
+	console.log("[Format] Verdict emoji:", verdictEmoji[factCheck.verdict]);
+	const response = `${factCheck.verdict}\n${factCheck.explanation}${
+		factCheck.source ? `\nSource: ${factCheck.source}` : ""
+	}`.slice(0, 300);
+	console.log("[Format] Formatted response:", response);
 	return response;
 }
 
