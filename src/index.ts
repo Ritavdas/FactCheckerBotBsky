@@ -190,12 +190,26 @@ async function trackAction(action: keyof typeof RATE_LIMITS.ACTION_COSTS) {
 	await saveRateLimit(rateLimit);
 }
 
-async function queryPerplexity(text: string): Promise<PerplexityResponse> {
-	console.log(
-		"[Perplexity] Querying API with text:",
-		text.slice(0, 100) + "..."
-	);
+interface PerplexityError extends Error {
+	type: "API_ERROR" | "RATE_LIMIT" | "NETWORK_ERROR" | "PARSING_ERROR";
+	status?: number;
+	retryAfter?: number;
+}
+
+async function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function queryPerplexityWithRetry(
+	text: string,
+	attempt: number = 1
+): Promise<PerplexityResponse> {
+	const MAX_RETRIES = 5;
+	const BASE_DELAY = 1000;
+	const MAX_DELAY = 32000;
+
 	try {
+		console.log(`[Perplexity] Attempt ${attempt} of ${MAX_RETRIES}`);
 		const response = await fetch(
 			"https://api.perplexity.ai/chat/completions",
 			{
@@ -221,22 +235,84 @@ async function queryPerplexity(text: string): Promise<PerplexityResponse> {
 			}
 		);
 
+		if (!response.ok) {
+			const error = new Error("API request failed") as PerplexityError;
+			error.status = response.status;
+
+			if (response.status === 429) {
+				error.type = "RATE_LIMIT";
+				const retryAfter = parseInt(
+					response.headers.get("retry-after") || "60"
+				);
+				error.retryAfter = retryAfter;
+				throw error;
+			}
+
+			error.type = "API_ERROR";
+			throw error;
+		}
+
 		const data = await response.json();
-		console.log("[Perplexity] Raw API response:", data);
+
+		if (!data.choices?.[0]?.message?.content) {
+			const error = new Error(
+				"Invalid API response format"
+			) as PerplexityError;
+			error.type = "PARSING_ERROR";
+			throw error;
+		}
 
 		const [verdict, explanation, source] =
 			data.choices[0].message.content.split("|");
 
-		const result = {
+		if (!verdict || !explanation) {
+			const error = new Error(
+				"Invalid response format from model"
+			) as PerplexityError;
+			error.type = "PARSING_ERROR";
+			throw error;
+		}
+
+		return {
 			verdict: verdict.trim() as PerplexityResponse["verdict"],
 			explanation: explanation.trim(),
 			source: source?.trim(),
 		};
-		console.log("[Perplexity] Parsed response:", result);
-		return result;
-	} catch (error) {
-		console.error("[Perplexity] API Error:", error);
-		throw error;
+	} catch (error: any) {
+		if (attempt >= MAX_RETRIES) {
+			throw error;
+		}
+
+		const exponentialDelay = Math.min(
+			MAX_DELAY,
+			BASE_DELAY * Math.pow(2, attempt - 1)
+		);
+		const jitter = Math.random() * 1000;
+		const delay = exponentialDelay + jitter;
+
+		if (
+			(error as PerplexityError).type === "RATE_LIMIT" &&
+			(error as PerplexityError).retryAfter
+		) {
+			await sleep((error as PerplexityError).retryAfter! * 1000);
+		} else {
+			await sleep(delay);
+		}
+
+		return queryPerplexityWithRetry(text, attempt + 1);
+	}
+}
+
+async function queryPerplexity(text: string): Promise<PerplexityResponse> {
+	try {
+		return await queryPerplexityWithRetry(text);
+	} catch (error: any) {
+		return {
+			verdict: "Unverified",
+			explanation:
+				"Unable to verify due to technical difficulties. Please try again later.",
+			source: "System Error",
+		};
 	}
 }
 
@@ -248,22 +324,31 @@ async function formatFactCheckResponse(
 	factCheck: PerplexityResponse,
 	originalText: string
 ): Promise<string> {
-	console.log("[Format] Formatting response for:", {
-		verdict: factCheck.verdict,
-		originalText: originalText.slice(0, 50) + "...",
-	});
+	const splitter = new GraphemeSplitter();
 
 	const verdictEmoji = {
-		True: "✅",
-		False: "❌",
-		Misleading: "⚠️",
-		Unverified: "❓",
-	}[factCheck.verdict];
+		True: "\u2705", // ✅
+		False: "\u274C", // ❌
+		Misleading: "\u26A0\uFE0F", // ⚠️
+		Unverified: "\u2753", // ❓
+	};
 
-	const response = `${verdictEmoji} ${factCheck.verdict}\n${
+	let response = `${verdictEmoji[factCheck.verdict]} ${factCheck.verdict}\n${
 		factCheck.explanation
-	}${factCheck.source ? `\nSource: ${factCheck.source}` : ""}`.slice(0, 290);
-	console.log("[Format] Formatted response:", response);
+	}`;
+	if (factCheck.source) {
+		response += `\nSource: ${factCheck.source}`;
+	}
+
+	// Ensure the response doesn't exceed 300 grapheme clusters
+	if (splitter.countGraphemes(response) > 300) {
+		const truncated = splitter
+			.splitGraphemes(response)
+			.slice(0, 300)
+			.join("");
+		response = truncated;
+	}
+
 	return response;
 }
 
@@ -326,24 +411,7 @@ async function createPost(
 		return;
 	}
 
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
-
 	try {
-		const confirm = await new Promise((resolve) => {
-			rl.question("Create post? (Y/N): ", (answer) => {
-				rl.close();
-				resolve(answer.toLowerCase() === "y");
-			});
-		});
-
-		if (!confirm) {
-			console.log("[Post] Post creation cancelled by user");
-			return;
-		}
-
 		console.log("[Post] Creating RichText");
 		const richText = new RichText({ text });
 		await richText.detectFacets(agent);
@@ -419,10 +487,6 @@ async function processNotifications() {
 					new Date().toISOString()
 				);
 
-				agent.app.bsky.notification.updateSeen({
-					seenAt: new Date().toISOString(),
-				});
-
 				// Then process and create the post
 				await handleFactCheckRequest(
 					(request.record as NotificationRecord).text,
@@ -439,6 +503,9 @@ async function processNotifications() {
 				continue;
 			}
 		}
+		agent.app.bsky.notification.updateSeen({
+			seenAt: new Date().toISOString(),
+		});
 	} catch (error) {
 		console.error("[Notifications] Failed to process notifications:", error);
 	}
@@ -489,10 +556,31 @@ const job = new CronJob("* * * * *", () => {
 	console.log("[Cron] Task completed");
 });
 
+const runTask = () => {
+	console.log("* * * * * * \n");
+	console.log("[Cron] Running scheduled task");
+	main().catch((error) => {
+		console.error("[Cron] Unhandled error in main:", error);
+	});
+	console.log("[Cron] Task completed");
+};
+
+// Set up the interval
+const THIRTY_SECONDS = 10 * 1000; // 30 seconds in milliseconds
+let intervalId: NodeJS.Timeout;
+
+// Replace the cron job initialization with this
+const startInterval = () => {
+	// Run immediately on start
+	runTask();
+
+	// Then set up the interval
+	intervalId = setInterval(runTask, THIRTY_SECONDS);
+};
+
 ensureAuth().then((success) => {
 	if (success) {
-		main();
-		job.start();
+		startInterval();
 	} else {
 		console.error("[Startup] Initial authentication failed");
 		process.exit(1);
