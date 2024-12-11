@@ -1,7 +1,10 @@
+// services/perplexity/api.ts
 import { PERPLEXITY_CONFIG } from "../../config/constants";
 import { ENV } from "../../config/environment";
 import { PerplexityResponse, PerplexityError } from "./types";
 import { sleep } from "../../utils/helpers";
+
+const MAX_EXPLANATION_LENGTH = 300;
 
 async function queryPerplexityWithRetry(
 	text: string,
@@ -25,8 +28,9 @@ async function queryPerplexityWithRetry(
 						{
 							role: "system",
 							content: `You are a fact-checker. 
-                            Provide a verdict (True/False/Misleading/Unverified) and a brief explanation (exactly 200 characters).
+                            Provide a verdict (True/False/Misleading/Unverified) and a brief explanation (MUST be exactly 200 characters or less).
                             Don't include citations in brackets.
+                            The explanation must be complete and coherent, not cut off mid-sentence.
                             Format: {verdict}|{explanation}`,
 						},
 						{
@@ -58,11 +62,26 @@ async function queryPerplexityWithRetry(
 		const data = await response.json();
 		const [verdict, explanation] = data.choices[0].message.content.split("|");
 
+		// Strictly enforce 300 character limit
+		let cleanExplanation = explanation.trim();
+		if (cleanExplanation.length > MAX_EXPLANATION_LENGTH) {
+			cleanExplanation = cleanExplanation.slice(0, MAX_EXPLANATION_LENGTH);
+			// Make sure we don't cut off mid-word or mid-sentence
+			const lastPeriod = cleanExplanation.lastIndexOf(".");
+			const lastSpace = cleanExplanation.lastIndexOf(" ");
+			const cutoffIndex =
+				lastPeriod > 0
+					? lastPeriod + 1
+					: lastSpace > 0
+					? lastSpace
+					: MAX_EXPLANATION_LENGTH;
+			cleanExplanation = cleanExplanation.slice(0, cutoffIndex).trim();
+		}
+
 		return {
 			verdict: verdict.trim() as PerplexityResponse["verdict"],
-			explanation: explanation.trim(),
-			// citations: data.citations || [],
-			citations: [],
+			explanation: cleanExplanation,
+			citations: data.citations || [],
 		};
 	} catch (error: any) {
 		if (attempt >= MAX_RETRIES) {
