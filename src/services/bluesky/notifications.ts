@@ -5,6 +5,38 @@ import { createPost } from "./post";
 import { queryPerplexity } from "../perplexity/api";
 import { canPerformAction } from "../ratelimit/limiter";
 import { formatFactCheckResponse } from "./post";
+import { sleep } from "../../utils/helpers";
+
+const MAX_POST_LENGTH = 300;
+
+function splitCitationsForPosts(citations: string[]): string[] {
+	const posts: string[] = [];
+	let currentPost = "Sources:\n";
+	let currentNumber = 1;
+
+	for (const citation of citations) {
+		const nextCitation = `${currentNumber}. ${citation}\n`;
+
+		if ((currentPost + nextCitation).length > MAX_POST_LENGTH) {
+			// Save current post if it has content
+			if (currentPost !== "Sources:\n") {
+				posts.push(currentPost.trim());
+			}
+			// Start new post
+			currentPost = `Sources (cont.):\n${nextCitation}`;
+		} else {
+			currentPost += nextCitation;
+		}
+		currentNumber++;
+	}
+
+	// Add final post if it has content
+	if (currentPost !== "Sources:\n") {
+		posts.push(currentPost.trim());
+	}
+
+	return posts;
+}
 
 export async function handleFactCheckRequest(
 	text: string,
@@ -31,8 +63,14 @@ export async function handleFactCheckRequest(
 
 			// Post citations if they exist
 			if (factCheck.citations?.length) {
-				const citationsText = "Sources:\n" + factCheck.citations.join("\n");
-				await createPost(citationsText, mainPostData);
+				let lastPostRef = mainPostData;
+				const citationPosts = splitCitationsForPosts(factCheck.citations);
+
+				for (const citationPost of citationPosts) {
+					lastPostRef = await createPost(citationPost, lastPostRef);
+					// Add small delay between posts to avoid rate limiting
+					await sleep(1000);
+				}
 			}
 		} else {
 			throw new Error("Failed to fetch parent post");
@@ -44,7 +82,6 @@ export async function handleFactCheckRequest(
 		await createPost(errorResponse, replyTo);
 	}
 }
-
 export async function processNotifications() {
 	try {
 		const { data } = await agent.listNotifications({ limit: 20 });
