@@ -86,7 +86,7 @@ async function queryPerplexityWithRetry(
 		return {
 			verdict: verdict.trim() as PerplexityResponse["verdict"],
 			explanation: cleanExplanation,
-			citations: data.citations || [],
+			citations: (data.citations || []).slice(0, 5), // Limit to max 5 citations
 		};
 	} catch (error: any) {
 		if (attempt >= MAX_RETRIES) {
@@ -166,9 +166,8 @@ async function queryPerplexityForInfo(
 						{
 							role: "system",
 							content: `You are an information provider.
-                            Provide a main summary (MUST be exactly 200 characters or less) and 3-5 detailed points about the topic.
-                            The response should be comprehensive yet concise.
-                            Format: {main_info}|{detail1}|{detail2}|{detail3}|{detail4}|{detail5}`,
+                            Provide a main summary (MUST be exactly 200 characters or less).
+                            The response should be comprehensive.`,
 						},
 						{
 							role: "user",
@@ -200,7 +199,7 @@ async function queryPerplexityForInfo(
 			details: details
 				.map((detail: string) => detail.trim())
 				.filter(Boolean),
-			sources: data.citations || [],
+			sources: (data.citations || []).slice(0, 5), // Limit to max 5 citations
 		};
 	} catch (error: any) {
 		// Reuse existing error handling

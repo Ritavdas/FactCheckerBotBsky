@@ -42,9 +42,7 @@ async function handleMoreInfoRequest(
 	replyTo?: { uri: string; cid: string }
 ) {
 	try {
-		if (!replyTo) {
-			throw new Error("No reply context provided");
-		}
+		if (!replyTo) throw new Error("No reply context provided");
 
 		const threadResponse = await agent.getPostThread({ uri: replyTo.uri });
 		const threadView = threadResponse.data.thread;
@@ -56,34 +54,24 @@ async function handleMoreInfoRequest(
 				"moreinfo"
 			)) as InfoResponse;
 
-			// Post main information
-			const mainResponse = `📚 More Information\n${infoResponse.mainInfo}`;
-			const mainPostData = await createPost(mainResponse, replyTo);
+			// Main info post
+			const mainPostData = await createPost(infoResponse.mainInfo, replyTo);
 
-			// Post details if they exist
-			if (infoResponse.details.length) {
-				let lastPostRef = mainPostData;
-				const formattedDetails =
-					"Additional Details:\n" + infoResponse.details.join("\n");
-
-				lastPostRef = await createPost(formattedDetails, lastPostRef);
-				await sleep(1000);
-
-				// Post sources if they exist
-				if (infoResponse.sources.length) {
-					const sourcesText =
-						"Sources:\n" + infoResponse.sources.join("\n");
-					await createPost(sourcesText, lastPostRef);
+			// Citations if they exist
+			if (infoResponse.sources?.length) {
+				const citationsText = splitCitationsForPosts(infoResponse.sources);
+				for (const citation of citationsText) {
+					await createPost(citation, mainPostData);
+					await sleep(1000);
 				}
 			}
-		} else {
-			throw new Error("Failed to fetch parent post");
 		}
 	} catch (error) {
 		console.error("[Handler] Error:", error);
-		const errorResponse =
-			"I apologize, but I encountered an error while gathering information. Please try again later.";
-		await createPost(errorResponse, replyTo);
+		await createPost(
+			"I apologize, but I encountered an error. Please try again later.",
+			replyTo
+		);
 	}
 }
 export async function handleFactCheckRequest(
