@@ -37,7 +37,55 @@ function splitCitationsForPosts(citations: string[]): string[] {
 
 	return posts;
 }
+async function handleMoreInfoRequest(
+	text: string,
+	replyTo?: { uri: string; cid: string }
+) {
+	try {
+		if (!replyTo) {
+			throw new Error("No reply context provided");
+		}
 
+		const threadResponse = await agent.getPostThread({ uri: replyTo.uri });
+		const threadView = threadResponse.data.thread;
+
+		if ("parent" in threadView && threadView.parent?.post?.record.text) {
+			const contentToCheck = threadView.parent.post.record.text;
+			const infoResponse = (await queryPerplexity(
+				contentToCheck,
+				"moreinfo"
+			)) as InfoResponse;
+
+			// Post main information
+			const mainResponse = `📚 More Information\n${infoResponse.mainInfo}`;
+			const mainPostData = await createPost(mainResponse, replyTo);
+
+			// Post details if they exist
+			if (infoResponse.details.length) {
+				let lastPostRef = mainPostData;
+				const formattedDetails =
+					"Additional Details:\n" + infoResponse.details.join("\n");
+
+				lastPostRef = await createPost(formattedDetails, lastPostRef);
+				await sleep(1000);
+
+				// Post sources if they exist
+				if (infoResponse.sources.length) {
+					const sourcesText =
+						"Sources:\n" + infoResponse.sources.join("\n");
+					await createPost(sourcesText, lastPostRef);
+				}
+			}
+		} else {
+			throw new Error("Failed to fetch parent post");
+		}
+	} catch (error) {
+		console.error("[Handler] Error:", error);
+		const errorResponse =
+			"I apologize, but I encountered an error while gathering information. Please try again later.";
+		await createPost(errorResponse, replyTo);
+	}
+}
 export async function handleFactCheckRequest(
 	text: string,
 	replyTo?: { uri: string; cid: string }
@@ -95,6 +143,7 @@ export async function processNotifications() {
 		);
 		console.log("[Notifications] Found", unseenCount, "unseen notifications");
 
+		// Handle factcheck requests
 		const factCheckRequests = data.notifications.filter(
 			(notif) =>
 				notif.reason === "mention" &&
@@ -105,12 +154,29 @@ export async function processNotifications() {
 				(notif.record as NotificationRecord).reply?.parent
 		);
 
+		// Handle moreinfo requests
+		const moreInfoRequests = data.notifications.filter(
+			(notif) =>
+				notif.reason === "mention" &&
+				!notif.isRead &&
+				(notif.record as NotificationRecord).text
+					.toLowerCase()
+					.includes("#moreinfo") &&
+				(notif.record as NotificationRecord).reply?.parent
+		);
+
 		console.log(
 			"[Notifications] Filtered",
 			factCheckRequests.length,
 			"fact check requests"
 		);
+		console.log(
+			"[Notifications] Filtered",
+			moreInfoRequests.length,
+			"more info requests"
+		);
 
+		// Process fact checks
 		for (const request of factCheckRequests) {
 			try {
 				if (!(await canPerformAction("CREATE"))) {
@@ -121,6 +187,32 @@ export async function processNotifications() {
 				}
 
 				await handleFactCheckRequest(
+					(request.record as NotificationRecord).text,
+					{ uri: request.uri, cid: request.cid }
+				);
+
+				await new Promise((resolve) => setTimeout(resolve, 2000));
+			} catch (error) {
+				console.error(
+					"[Notifications] Error processing notification:",
+					request.uri,
+					error
+				);
+				continue;
+			}
+		}
+
+		// Process more info requests
+		for (const request of moreInfoRequests) {
+			try {
+				if (!(await canPerformAction("CREATE"))) {
+					console.log(
+						"[Notifications] Rate limit reached. Waiting for next cycle."
+					);
+					break;
+				}
+
+				await handleMoreInfoRequest(
 					(request.record as NotificationRecord).text,
 					{ uri: request.uri, cid: request.cid }
 				);
