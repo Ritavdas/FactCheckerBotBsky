@@ -4,7 +4,7 @@
 #
 
 app = 'factcheckerbot'
-primary_region = 'fra'
+primary_region = 'bom'
 
 [build]
 
