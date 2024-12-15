@@ -173,6 +173,9 @@ export async function processNotifications() {
 					);
 					break;
 				}
+				await agent.app.bsky.notification.updateSeen({
+					seenAt: new Date().toISOString(),
+				});
 
 				await handleFactCheckRequest(
 					(request.record as NotificationRecord).text,
@@ -199,6 +202,9 @@ export async function processNotifications() {
 					);
 					break;
 				}
+				await agent.app.bsky.notification.updateSeen({
+					seenAt: new Date().toISOString(),
+				});
 
 				await handleMoreInfoRequest(
 					(request.record as NotificationRecord).text,
@@ -216,9 +222,9 @@ export async function processNotifications() {
 			}
 		}
 
-		await agent.app.bsky.notification.updateSeen({
-			seenAt: new Date().toISOString(),
-		});
+		// await agent.app.bsky.notification.updateSeen({
+		// 	seenAt: new Date().toISOString(),
+		// });
 	} catch (error) {
 		console.error("[Notifications] Failed to process notifications:", error);
 	}
