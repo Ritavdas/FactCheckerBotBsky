@@ -120,7 +120,7 @@ export async function handleFactCheckRequest(
 }
 export async function processNotifications() {
 	try {
-		const { data } = await agent.listNotifications({ limit: 20 });
+		const { data } = await agent.listNotifications({ limit: 1 });
 
 		// Get unread notifications count
 		const unseenCount = data.notifications.filter((n) => !n.isRead).length;
