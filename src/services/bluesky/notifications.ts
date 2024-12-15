@@ -118,21 +118,31 @@ export async function handleFactCheckRequest(
 		await createPost(errorResponse, replyTo);
 	}
 }
+const processedNotifications = new Set<string>();
+
 export async function processNotifications() {
 	try {
 		const { data } = await agent.listNotifications({ limit: 1 });
 
+		const unprocessedNotifications = data.notifications.filter(
+			(notif) => !processedNotifications.has(notif.uri)
+		);
+		
+		// for (const notif of unprocessedNotifications) {
+		// 	// Process notification
+		// 	processedNotifications.add(notif.uri);
+		// }
 		// Get unread notifications count
-		const unseenCount = data.notifications.filter((n) => !n.isRead).length;
+		const unseenCount = unprocessedNotifications.filter((n) => !n.isRead).length;
 		console.log(
 			"[Notifications] Found",
-			data.notifications.length,
+			unprocessedNotifications.length,
 			"total notifications"
 		);
 		console.log("[Notifications] Found", unseenCount, "unseen notifications");
 
 		// Handle factcheck requests
-		const factCheckRequests = data.notifications.filter(
+		const factCheckRequests = unprocessedNotifications.filter(
 			(notif) =>
 				notif.reason === "mention" &&
 				!notif.isRead &&
@@ -143,7 +153,7 @@ export async function processNotifications() {
 		);
 
 		// Handle moreinfo requests
-		const moreInfoRequests = data.notifications.filter(
+		const moreInfoRequests = unprocessedNotifications.filter(
 			(notif) =>
 				notif.reason === "mention" &&
 				!notif.isRead &&
@@ -173,16 +183,20 @@ export async function processNotifications() {
 					);
 					break;
 				}
-				await agent.app.bsky.notification.updateSeen({
-					seenAt: new Date().toISOString(),
-				});
+				processedNotifications.add(request.uri);
 
 				await handleFactCheckRequest(
 					(request.record as NotificationRecord).text,
 					{ uri: request.uri, cid: request.cid }
 				);
 
-				await new Promise((resolve) => setTimeout(resolve, 2000));
+				await agent.app.bsky.notification.updateSeen({
+					seenAt: new Date().toISOString(),
+				});
+
+                await sleep(2000);
+
+				// await new Promise((resolve) => setTimeout(resolve, 2000));
 			} catch (error) {
 				console.error(
 					"[Notifications] Error processing notification:",
@@ -206,12 +220,14 @@ export async function processNotifications() {
 					seenAt: new Date().toISOString(),
 				});
 
+				processedNotifications.add(request.uri);
+
 				await handleMoreInfoRequest(
 					(request.record as NotificationRecord).text,
 					{ uri: request.uri, cid: request.cid }
 				);
 
-				await new Promise((resolve) => setTimeout(resolve, 2000));
+				await sleep(2000);
 			} catch (error) {
 				console.error(
 					"[Notifications] Error processing notification:",
@@ -222,9 +238,11 @@ export async function processNotifications() {
 			}
 		}
 
-		// await agent.app.bsky.notification.updateSeen({
-		// 	seenAt: new Date().toISOString(),
-		// });
+		if (unprocessedNotifications.length > 0) {
+			await agent.app.bsky.notification.updateSeen({
+				seenAt: new Date().toISOString(),
+			});
+		}
 	} catch (error) {
 		console.error("[Notifications] Failed to process notifications:", error);
 	}
